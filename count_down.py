@@ -1,0 +1,9 @@
+import time
+def count_down(end,start=0) :
+    for x in range(start,end+1):
+        print(x)
+        time.sleep(1)
+    print("done")
+
+
+print(count_down(5))

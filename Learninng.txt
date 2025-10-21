@@ -1,0 +1,96 @@
+Method:
+
+<1>"variable_name".upper() //for displaying the variable in upper case 
+<2>"variable_name".lower() //for displaying the variable in lower case
+<3>"variable_name".title() //converting the first letter to upper case to upper rest to lower
+<4>"variable_name".find() // find the string or word in a variable case sensitive
+<5>"variable_name".replace() 
+<6>"word that needed to be check" in "variable name" //find word in variable and give ans           
+                                                      in T or F
+
+Arithmetic:
+
+<1> A + B // it add two value of a variable
+<2> A - B // it sub two value of a variable
+<3> A / B // it divide the value of a variable
+<4> A//B //it return value in integer forms
+<5> A * B //it multiply the value 
+<6> A % B //it returns the remainder only
+<7> A ** B // it makes the value to a power to b (10[a]**3[b]) 
+
+OPERATOR PRECEDENCE:
+
+<1>Parenthesis // Higher
+<2>Exponetion    // |
+<3>Multiplication //|
+<4>Addition or Subtraction //Lower
+
+Logical operator :
+
+<1> A AND Not B // NOT will change to false to true and vice-versa and then check the AND    
+                   statement
+<2> A AND B // both needed to be true 
+<3> A OR B // one can be true 
+
+For loops :
+
+List [] = Example -> for count in number[1,2,3,4,5]
+                     for item in range (5,10,2) // (start,stop,step)// Example of range                     
+                                                                       function
+          Output  -> 5
+                     7 // it will work till stopvalue-1 
+                     9
+LIST METHOD []:
+
+<1> "List name".append(num which needs to be added) // it always add number at the end of    
+                                                        the list
+
+<2> "List name".insert("index", variable)    // it take two value first value is index or                 
+                                            position second is value
+
+<3> "List name".remove(variable)           // it remove the value which is entered 
+
+<4> "List name".clear()                   // it clears the whole list 
+
+<5> "List name".pop()                   // it remove the last value of the list
+
+<6> "List name".index(variable)         // it show the index of first occurrence of value
+                                        // it show error if value is not present in list
+
+<7> "variable" in list name          // it give output in Boolean(t or f)and tell if  
+                                       variable is present in list or not
+
+<8>  listname.count(variable)        // tell the number of time variable has occurred
+
+<9>  listname.sort()                 // it sort the list in ascending order 
+                                     // don't use the command inside the print command 
+                                        output will be none
+
+<10> listname.reverse()             // it is use after the sort for descending of list
+
+<11> listname.copy()                // it copy the original list 
+
+
+TURPLE () :                   // it is immutable
+
+DISTIONARY {} :              // it store value in key value form
+                             // key should be always unique
+
+
+MODULES :                  // A module is simply a file with Python code that helps organize and reuse code.
+
+ Types of Modules
+
+<1>  Built-in Modules:         //These are provided by Python, like math, random, and os.
+
+
+<2>Custom Modules:            //These are Python files (.py) you create to organize your own code.
+
+
+
+
+
+
+ 
+
+ 

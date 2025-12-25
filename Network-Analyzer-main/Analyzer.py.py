@@ -1,35 +1,46 @@
 import sys
 import threading
 import socket
-import scapy.all as scapy
-from collections import defaultdict
-import datetime
-import random
-import subprocess
-import requests
-import time
 import csv
 import os
 import ipaddress
+from collections import defaultdict
+
+# Third-party Imports
+import scapy.all as scapy
+import requests
 import networkx as nx
 import netifaces
 
 # PyQt6 Imports
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit,  
-                             QVBoxLayout, QHBoxLayout, QWidget, 
-                             QInputDialog, QPushButton, QLabel, QGridLayout)
-from PyQt6.QtGui import QAction, QTextCursor, QFont
+                             QVBoxLayout, QWidget, QInputDialog, 
+                             QPushButton, QLabel, QGridLayout)
+from PyQt6.QtGui import QAction, QTextCursor
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 
-# --- [1] MOCK REPORT GENERATOR ---
-class Report_Generator:
-    def CSV_GenerateReport(self, Data):
-        print("<i style='color:#888'>[Log] CSV Report saved (Mock).</i>")
-    def TXT_GenerateReport(self, Data):
-        print("<i style='color:#888'>[Log] TXT Report saved (Mock).</i>")
+# ==========================================
+# CONFIGURATION & CONSTANTS
+# ==========================================
+MAC_VENDOR_API = "https://macvendorlookup.com/api/v2/"
+MAC_DB_FILE = "MAC.CSV"
+DEFAULT_TIMEOUT = 2
+DNS_SERVERS = ["8.8.8.8", "1.1.1.1"]
 
-# --- [2] OUTPUT REDIRECTION (Now handles HTML) ---
-class Stream(QObject):
+# ==========================================
+# UTILITIES & HELPERS
+# ==========================================
+
+class ReportGenerator:
+    """Handles saving data to files (Mock implementation)."""
+    def save_csv(self, data):
+        print("<i style='color:#888'>[Log] CSV Report saved (Mock).</i>")
+
+class LogStream(QObject):
+    """
+    Redirects Python's print() statements to the PyQt GUI.
+    This allows us to write HTML directly to the text box.
+    """
     new_text = pyqtSignal(str)
 
     def write(self, text):
@@ -38,125 +49,125 @@ class Stream(QObject):
     def flush(self):
         pass
 
-# --- [3] LOGIC CLASSES (Refined for HTML Output) ---
+# ==========================================
+# CORE LOGIC: NETWORK SCANNER
+# ==========================================
 
-class Discover:
-    def __init__(self, NetworkIP_CiderIPv4: str = None, NetworkIP: str = None, 
-                SubnetCiderNotation: int = None, subnet_mask: str = None, 
-                NetworkInterface: str = None, WaitingTimeDelay: int = 3,
-                Orginal_MAC: str = None, MOCK_MAC: list = None,
-                MACsite: str = None):
+class NetworkScanner:
+    """
+    Handles active network scanning tasks:
+    - Identifying local IP/Subnet
+    - ARP Scanning
+    - MAC Vendor lookup
+    """
+    def __init__(self):
+        self.reporter = ReportGenerator()
+        self.mac_db = self._load_mac_vendor_db()
         
-        self.Reporter = Report_Generator()
-        self.NetworkIP_CiderIPv4 = NetworkIP_CiderIPv4
-        self.NetworkIP = NetworkIP
-        self.SubnetCiderNotation = SubnetCiderNotation
-        self.subnet_mask = subnet_mask
-        self.WaitingTime = WaitingTimeDelay
-        self.Orginal_MAC = Orginal_MAC
-        self.MOCK_MAC = MOCK_MAC
-        self.NetworkInterface = NetworkInterface
-        self.MACsite = MACsite or "https://macvendorlookup.com/api/v2/"
-        self.private_IPv4 = None
-        
-        if not os.path.exists("MAC.CSV"):
-            with open("MAC.CSV", "w") as f: f.write("Assignment,Organization Name\n")
-            
-        self.mac_vendor_data = self.read_mac_vendor_csv("MAC.CSV")
-        self.network_graph = nx.Graph()
-        self.DiscoveredData = []
-        self.HostData = {}
-    
-    def read_mac_vendor_csv(self, csv_file):
+        # Network State
+        self.network_cidr = None    # e.g., IPv4Network('192.168.1.0/24')
+        self.my_ip = None           # e.g., '192.168.1.15'
+        self.interface = None       # e.g., 'eth0' or 'wlan0'
+        self.discovered_hosts = []
+
+    def _load_mac_vendor_db(self):
+        """Loads MAC address prefixes from a local CSV file."""
+        if not os.path.exists(MAC_DB_FILE):
+            with open(MAC_DB_FILE, "w") as f: 
+                f.write("Assignment,Organization Name\n")
+            return {}
+
         try:
-            mac_vendor_data = {}
-            with open(csv_file, 'r') as file:
+            data = {}
+            with open(MAC_DB_FILE, 'r') as file:
                 reader = csv.DictReader(file)
                 for row in reader:
                     if 'Assignment' in row and 'Organization Name' in row:
-                        mac_prefix = row.get('Assignment')[:4].upper() 
-                        vendor = row.get('Organization Name')
-                        if mac_prefix and vendor:
-                            mac_vendor_data[mac_prefix] = vendor
-            return mac_vendor_data
-        except Exception as e:
+                        prefix = row.get('Assignment')[:4].upper()
+                        data[prefix] = row.get('Organization Name')
+            return data
+        except Exception:
             return {}
 
-    def get_vendor_info(self, macaddress):
+    def get_vendor(self, mac_address):
+        """Resolves MAC address to Manufacturer via Local DB or API."""
         try:
-            mac_prefix = macaddress[:8].replace(':', '').upper()[:4]
-            vendor = self.mac_vendor_data.get(mac_prefix)
-            if vendor is not None:
-                return f"{vendor}"
-            else:
-                if self.MACsite != None:
-                    try:
-                        macsend = self.MACsite + macaddress
-                        response = requests.get(macsend, timeout=2) 
-                        if response.status_code == 200:
-                            data = response.json()
-                            if data:
-                                return f"{data[0].get('company', 'Unknown')} (API)"
-                    except:
-                        pass
-                return "Unknown Vendor"
+            # Check Local DB first
+            clean_mac = mac_address[:8].replace(':', '').upper()[:4]
+            if clean_mac in self.mac_db:
+                return self.mac_db[clean_mac]
+            
+            # Fallback to API
+            try:
+                response = requests.get(f"{MAC_VENDOR_API}{mac_address}", timeout=DEFAULT_TIMEOUT)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data:
+                        return f"{data[0].get('company', 'Unknown')} (API)"
+            except:
+                pass
+            return "Unknown Vendor"
         except:
             return "Error"
 
-    def GetNetworkData(self, PrintDetails=False, save_to_file=False):
+    def get_network_details(self, print_output=False):
+        """Detects the active private network interface and IP configuration."""
         try:
-            interfaces = netifaces.interfaces()
-            found = False
-            for iface in interfaces:
-                if iface == 'lo': continue
-                addresses = netifaces.ifaddresses(iface)
-                if netifaces.AF_INET in addresses:
-                    ipv4_info = addresses[netifaces.AF_INET][0]
-                    ip_address = ipv4_info['addr']
-                    if ipaddress.IPv4Address(ip_address).is_private:
-                        self.private_IPv4 = ip_address
-                        self.NetworkInterface = iface
-                        subnet_mask_str = ipv4_info.get('netmask', '255.255.255.0')
-                        network = ipaddress.IPv4Network(f"{ip_address}/{subnet_mask_str}", strict=False)
-                        self.NetworkIP_CiderIPv4 = network
-                        self.NetworkIP = network.network_address
-                        self.SubnetCiderNotation = network.prefixlen
-                        found = True
+            for iface in netifaces.interfaces():
+                if iface == 'lo': continue # Skip localhost
+                
+                addrs = netifaces.ifaddresses(iface)
+                if netifaces.AF_INET in addrs:
+                    ipv4_data = addrs[netifaces.AF_INET][0]
+                    ip = ipv4_data['addr']
+                    
+                    # We only care about Private IPs (LANs)
+                    if ipaddress.IPv4Address(ip).is_private:
+                        self.my_ip = ip
+                        self.interface = iface
+                        netmask = ipv4_data.get('netmask', '255.255.255.0')
                         
-                        if PrintDetails:
-                            print(f"""
-                            <h3 style='color:#00AAFF; margin-bottom:5px;'>NETWORK CONFIGURATION</h3>
-                            <table border='1' cellpadding='5' cellspacing='0' width='100%' style='border-color:#444;'>
-                                <tr><td width='30%'><b>Interface</b></td><td>{iface}</td></tr>
-                                <tr><td><b>IPv4 Address</b></td><td><span style='color:#00FF41'>{ip_address}</span></td></tr>
-                                <tr><td><b>Network Range</b></td><td>{network}</td></tr>
-                                <tr><td><b>Subnet Mask</b></td><td>{subnet_mask_str}</td></tr>
-                            </table><br>
-                            """)
+                        # Calculate CIDR
+                        network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
+                        self.network_cidr = network
+                        
+                        if print_output:
+                            self._print_network_html(iface, ip, str(network), netmask)
                         return True
             
-            if not found:
-                 print("<span style='color:red'>[!] Could not detect active private interface.</span>")
+            print("<span style='color:red'>[!] Could not detect active private interface.</span>")
             return False
-
         except Exception as e:
             print(f"<span style='color:red'>[!] Error getting network data: {e}</span>")
             return None
 
-    def ARP_DiscoverHosts(self, maxHostgroup=5, verbose=False, mapping=False, save_to_file=False):
-        try:
-            self.GetNetworkData(PrintDetails=False)
-            print(f"<span style='color:#00AAFF'><b>[>] Starting ARP Scan on {self.NetworkIP_CiderIPv4}...</b></span><br>")
-            
-            arp_request = scapy.ARP(pdst=str(self.NetworkIP_CiderIPv4))
-            broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
-            request_broadcast = broadcast / arp_request
-            answered_packets = scapy.srp(request_broadcast, timeout=2, verbose=False)[0]
+    def _print_network_html(self, iface, ip, cidr, mask):
+        print(f"""
+        <h3 style='color:#00AAFF; margin-bottom:5px;'>NETWORK CONFIGURATION</h3>
+        <table border='1' cellpadding='5' cellspacing='0' width='100%' style='border-color:#444;'>
+            <tr><td width='30%'><b>Interface</b></td><td>{iface}</td></tr>
+            <tr><td><b>IPv4 Address</b></td><td><span style='color:#00FF41'>{ip}</span></td></tr>
+            <tr><td><b>Network Range</b></td><td>{cidr}</td></tr>
+            <tr><td><b>Subnet Mask</b></td><td>{mask}</td></tr>
+        </table><br>
+        """)
 
-            self.DiscoveredData = []
+    def scan_arp(self, verbose=False, save=False):
+        """Performs an ARP scan to discover devices on the LAN."""
+        try:
+            self.get_network_details(print_output=False)
+            print(f"<span style='color:#00AAFF'><b>[>] Starting ARP Scan on {self.network_cidr}...</b></span><br>")
             
-            # Start Table
-            table_html = """
+            # Scapy ARP Broadcast
+            arp_req = scapy.ARP(pdst=str(self.network_cidr))
+            broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+            packet = broadcast / arp_req
+            answered = scapy.srp(packet, timeout=2, verbose=False)[0]
+
+            self.discovered_hosts = []
+            
+            # Build HTML Table Header
+            html = """
             <table border='1' cellpadding='5' cellspacing='0' width='100%' style='border-color:#333; font-size:12px;'>
             <tr style='background-color:#222; color:white;'>
                 <th align='left'>IP Address</th>
@@ -165,15 +176,14 @@ class Discover:
             </tr>
             """
 
-            for sent, received in answered_packets:
-                vendor = self.get_vendor_info(received.hwsrc)
-                self.DiscoveredData.append({
+            for sent, received in answered:
+                vendor = self.get_vendor(received.hwsrc)
+                self.discovered_hosts.append({
                     "IP": received.psrc,
                     "MAC": received.hwsrc,
                     "Vendor": vendor
                 })
-                # Add Row
-                table_html += f"""
+                html += f"""
                 <tr>
                     <td><span style='color:#00FF41'><b>{received.psrc}</b></span></td>
                     <td>{received.hwsrc}</td>
@@ -181,39 +191,50 @@ class Discover:
                 </tr>
                 """
             
-            table_html += "</table><br>"
-            print(table_html)
-            print(f"<b>[$] Scan Complete. Found {len(answered_packets)} active devices.</b>")
+            html += "</table><br>"
+            print(html)
+            print(f"<b>[$] Scan Complete. Found {len(answered)} active devices.</b>")
 
-            if save_to_file:
-                self.Reporter.CSV_GenerateReport(Data=self.DiscoveredData)
+            if save: self.reporter.save_csv(self.discovered_hosts)
 
         except Exception as e:
             print(f"<span style='color:red'>[!] Error during ARP scan: {e}</span>")
 
-class Analyzer:
-    def __init__(self):
-        self.PrivateScanner = Discover()
+# ==========================================
+# CORE LOGIC: THREAT DETECTOR
+# ==========================================
 
-    def identify_devices_by_traffic(self, duration=60, verbose=False):
+class ThreatDetector:
+    """
+    Handles passive monitoring and anomaly detection:
+    - Traffic Profiling
+    - Rogue AP/Device Detection
+    - DNS Integrity
+    - SYN Flood Detection
+    """
+    def __init__(self):
+        self.scanner = NetworkScanner()
+
+    def profile_traffic(self, duration=60):
         print(f"<span style='color:#00AAFF'><b>[*] Profiling Traffic Patterns ({duration}s)...</b></span>")
         try:
-            traffic_patterns = defaultdict(set)
-            def packet_callback(packet):
+            traffic_map = defaultdict(set)
+            
+            def process_packet(packet):
                 if packet.haslayer(scapy.IP):
                     src = packet[scapy.IP].src
                     dst = packet[scapy.IP].dst
-                    traffic_patterns[src].add(dst)
+                    traffic_map[src].add(dst)
             
-            scapy.sniff(timeout=duration, prn=packet_callback, store=0)
+            scapy.sniff(timeout=duration, prn=process_packet, store=0)
             
-            print("<h3 style='color:#00AAFF'>TRAFFIC PROFILE RESULTS</h3>")
-            print("<ul>")
-            for ip, destinations in traffic_patterns.items():
+            print("<h3 style='color:#00AAFF'>TRAFFIC PROFILE RESULTS</h3><ul>")
+            for ip, destinations in traffic_map.items():
                 count = len(destinations)
+                # Heuristic: High connection count might indicate scanning or P2P
                 color = "white"
-                if count > 50: color = "orange" # Suspicious
-                if count > 200: color = "red"   # Very Suspicious
+                if count > 50: color = "orange" 
+                if count > 200: color = "red"   
                 
                 print(f"<li>Device <b>{ip}</b> connected to <span style='color:{color}'><b>{count}</b> unique destinations</span>.</li>")
             print("</ul>")
@@ -221,38 +242,39 @@ class Analyzer:
         except Exception as e:
             print(f"[!] Error: {e}")
 
-    def detect_rogue_access_points(self, verbose=False):
+    def detect_rogue_aps(self):
         print("<span style='color:#00AAFF'><b>[*] Scanning for Rogue Access Points...</b></span>")
         try:
-            discovered_aps = set()
-            def packet_callback(packet):
-                if packet.haslayer(scapy.Dot11):
+            discovered = set()
+            def process_packet(packet):
+                if packet.haslayer(scapy.Dot11): # WiFi Layer
                     try:
                         ssid = packet[scapy.Dot11].info.decode(errors='ignore')
                         bssid = packet[scapy.Dot11].addr2
-                        if bssid and (ssid, bssid) not in discovered_aps:
-                            discovered_aps.add((ssid, bssid))
+                        if bssid and (ssid, bssid) not in discovered:
+                            discovered.add((ssid, bssid))
                             if ssid:
                                 print(f"&nbsp;&nbsp;&nbsp;[+] SSID: <b>{ssid}</b> | MAC: {bssid}")
                     except: pass
 
-            scapy.sniff(prn=packet_callback, store=0, timeout=60)
+            scapy.sniff(prn=process_packet, store=0, timeout=60)
             print("<b>[$] AP Scan Complete.</b>")
         except Exception as e:
             print(f"[!] Error: {e}")
 
-    def detect_rogue_devices(self, known_devices_macs, verbose=False):
+    def detect_rogue_devices(self, whitelist_macs):
         print("<span style='color:#00AAFF'><b>[*] Scanning for Rogue Devices (ARP Verification)...</b></span>")
         try:
-            self.PrivateScanner.ARP_DiscoverHosts(verbose=False)
+            # Refresh the ARP table first
+            self.scanner.scan_arp(verbose=False)
             rogue_found = False
             
             print("<br><b>[Analysis Results]</b>")
-            for host in self.PrivateScanner.DiscoveredData:
-                if host["MAC"] not in known_devices_macs:
+            for host in self.scanner.discovered_hosts:
+                if host["MAC"] not in whitelist_macs:
                     print(f"<span style='color:#FF3333'>[!!!] ROGUE DETECTED: <b>{host['IP']}</b> ({host['MAC']})</span>")
                     rogue_found = True
-                elif verbose:
+                else:
                     print(f"<span style='color:#00FF41'>[+] Verified: {host['IP']}</span>")
             
             if not rogue_found:
@@ -260,51 +282,53 @@ class Analyzer:
         except Exception as e:
             print(f"[!] Error: {e}")
 
-    def query_dns(self, domain, dns_server, timeout=2):
-        try:
-            pkt = scapy.IP(dst=dns_server) / scapy.UDP(dport=53) / scapy.DNS(rd=1, qd=scapy.DNSQR(qname=domain))
-            response = scapy.sr1(pkt, timeout=timeout, verbose=0)
-            if response and response.haslayer(scapy.DNS):
-                for i in range(response[scapy.DNS].ancount):
-                    return response[scapy.DNS].an[i].rdata
-        except:
-            return None
-
-    def detect_dns_spoofing(self, target_domains, verbose=False):
+    def check_dns_spoofing(self, targets):
+        """Queries multiple public DNS servers to check if a domain resolves consistently."""
         print("<h3 style='color:#00AAFF'>DNS INTEGRITY CHECK</h3>")
-        dns_servers = ["8.8.8.8", "1.1.1.1"]
         
-        for domain, legit_ips in target_domains.items():
+        for domain, legit_ips in targets.items():
             print(f"<b>[-] Verifying: {domain}</b>")
-            for server in dns_servers:
-                resolved = self.query_dns(domain, server)
-                if resolved:
-                    if resolved not in legit_ips:
-                        print(f"&nbsp;&nbsp;&nbsp;<span style='color:orange'>[?] {server} returned {resolved} (Ref IP: {legit_ips[0]})</span>")
-                    else:
-                        print(f"&nbsp;&nbsp;&nbsp;<span style='color:#00FF41'>[+] {server} Verified: {resolved}</span>")
-                else:
+            for server in DNS_SERVERS:
+                try:
+                    # Construct DNS Query
+                    pkt = scapy.IP(dst=server) / scapy.UDP(dport=53) / scapy.DNS(rd=1, qd=scapy.DNSQR(qname=domain))
+                    resp = scapy.sr1(pkt, timeout=DEFAULT_TIMEOUT, verbose=0)
+                    
+                    if resp and resp.haslayer(scapy.DNS):
+                        # Extract the IP from the answer
+                        resolved_ip = resp[scapy.DNS].an.rdata if resp[scapy.DNS].ancount > 0 else "No Record"
+                        
+                        if resolved_ip not in legit_ips:
+                            print(f"&nbsp;&nbsp;&nbsp;<span style='color:orange'>[?] {server} returned {resolved_ip} (Ref IP: {legit_ips[0]})</span>")
+                        else:
+                            print(f"&nbsp;&nbsp;&nbsp;<span style='color:#00FF41'>[+] {server} Verified: {resolved_ip}</span>")
+                except Exception:
                     print(f"&nbsp;&nbsp;&nbsp;<span style='color:#888'>[.] {server} No response</span>")
 
-    def check_dns_poisoning(self, domain, known_ip):
+    def check_local_poisoning(self, domain, expected_ip):
+        """Checks if the system's local DNS resolver (hosts file/cache) is poisoned."""
         print(f"<b>[*] Checking Local DNS for {domain}...</b>")
         try:
             resolved_ip = socket.gethostbyname(domain)
-            if resolved_ip != known_ip:
-                print(f"<span style='color:red'><b>[!!!] POISONING ALERT</b></span><br>Local DNS resolves {domain} to <b>{resolved_ip}</b><br>Expected: {known_ip}")
+            if resolved_ip != expected_ip:
+                print(f"<span style='color:red'><b>[!!!] POISONING ALERT</b></span><br>Local DNS resolves {domain} to <b>{resolved_ip}</b><br>Expected: {expected_ip}")
             else:
                 print(f"<span style='color:#00FF41'><b>[+] Local DNS is Correct:</b></span> {resolved_ip}")
         except Exception as e:
             print(f"[!] Resolution Failed: {e}")
 
-    def detect_syn_flood(self, duration=60, threshold=100, verbose=False):
+    def detect_syn_flood(self, duration=60, threshold=100):
+        """Counts TCP SYN packets to detect DoS attempts."""
         print(f"<span style='color:#00AAFF'><b>[*] Monitoring for SYN Flood ({duration}s)...</b></span>")
         syn_count = 0
-        def packet_callback(packet):
+        
+        def count_syn(packet):
             nonlocal syn_count
+            # check for TCP layer and if the Flag is 'S' (SYN)
             if packet.haslayer(scapy.TCP) and packet[scapy.TCP].flags == 'S':
                 syn_count += 1
-        scapy.sniff(timeout=duration, prn=packet_callback, store=0)
+                
+        scapy.sniff(timeout=duration, prn=count_syn, store=0)
         
         if syn_count > threshold:
             print(f"<h2 style='color:red'>[!!!] ALERT: SYN FLOOD DETECTED</h2>")
@@ -312,47 +336,18 @@ class Analyzer:
         else:
             print(f"<span style='color:#00FF41'><b>[+] Traffic Normal.</b></span> SYN packets detected: {syn_count}")
 
-    def monitor_network_for_suspicious_activity(self, duration=60, verbose=False):
-        print(f"<span style='color:#00AAFF'><b>[*] Monitoring for Suspicious Flags (DF/Frag) ({duration}s)...</b></span>")
-        try:
-            self.PrivateScanner.GetNetworkData()
-            my_ip = self.PrivateScanner.private_IPv4
-            suspicious_count = defaultdict(int)
+# ==========================================
+# GRAPHICAL USER INTERFACE (GUI)
+# ==========================================
 
-            def packet_callback(packet):
-                if packet.haslayer(scapy.IP) and packet[scapy.IP].dst == my_ip:
-                    # Detection Logic: Pings or packets with DF flag from unexpected sources
-                    if packet[scapy.IP].flags == "DF":
-                        suspicious_count[packet[scapy.IP].src] += 1
-
-            scapy.sniff(timeout=duration, prn=packet_callback, store=0)
-            
-            print("<b>[$] Monitoring Complete. Results:</b>")
-            found = False
-            for src, count in suspicious_count.items():
-                if count > 5:
-                    print(f"<span style='color:orange'>[!] Suspicious Source: <b>{src}</b> ({count} events)</span>")
-                    found = True
-            if not found:
-                print("<span style='color:#888'>No significant anomalies detected.</span>")
-                
-        except Exception as e:
-            print(f"[!] Error: {e}")
-
-class EngineAnalyzer(Analyzer):
+class AppWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-# --- [4] GUI CLASS ---
-
-class AnalyzerGUI(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.engine = EngineAnalyzer()
+        self.logic_engine = ThreatDetector()
         
+        # UI Components
         self.output_log = QTextEdit()
         self.output_log.setReadOnly(True)
-        # Using Rich Text (HTML) capable styling
         self.output_log.setStyleSheet("""
             background-color: #0c0c0c; 
             color: #E0E0E0; 
@@ -362,137 +357,132 @@ class AnalyzerGUI(QMainWindow):
             padding: 15px;
         """)
         
-        sys.stdout = Stream(new_text=self.on_print)
-        sys.stderr = Stream(new_text=self.on_print)
+        # Redirect stdout/stderr to GUI
+        sys.stdout = LogStream(new_text=self.update_log)
+        sys.stderr = LogStream(new_text=self.update_log)
 
-        self.initUI()
+        self.init_ui()
 
-    def on_print(self, text):
-        # This function now intelligently handles HTML vs Plain text
-        if not text.strip(): return # Skip empty newlines
-        
-        # Inject the HTML directly into the text box
+    def update_log(self, text):
+        """Appends text (HTML allowed) to the main log window."""
+        if not text.strip(): return 
         self.output_log.insertHtml(text)
-        self.output_log.insertHtml("<br>") # Ensure newline after block
+        self.output_log.insertHtml("<br>") 
         
-        # Auto scroll to bottom
+        # Auto-scroll
         cursor = self.output_log.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.output_log.setTextCursor(cursor)
 
-    def initUI(self):
-        self.setWindowTitle('Network Analyzer & Forensic Suite Pro')
+    def init_ui(self):
+        self.setWindowTitle('Blue Team Network Analyzer')
         self.setGeometry(100, 100, 1000, 700)
 
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.main_layout = QVBoxLayout(self.central_widget)
+        # Layouts
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         
-        self.logo_label = QLabel("NETWORK FORENSIC ANALYZER")
-        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.logo_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #00AAFF; margin: 10px; letter-spacing: 2px;")
-        self.main_layout.addWidget(self.logo_label)
+        # Header
+        header = QLabel("NETWORK FORENSIC ANALYZER")
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #00AAFF; margin: 10px; letter-spacing: 2px;")
+        main_layout.addWidget(header)
 
-        self.main_layout.addWidget(self.output_log)
+        # Log Window
+        main_layout.addWidget(self.output_log)
 
-        self.btn_grid = QGridLayout()
-        self.btn_grid.setSpacing(10)
+        # Button Grid
+        btn_grid = QGridLayout()
+        btn_grid.setSpacing(10)
 
-        # Helper to create buttons
-        def mkbtn(txt, fn):
-            b = QPushButton(txt)
-            b.setStyleSheet("""
-                QPushButton { background-color: #222; color: white; padding: 15px; font-weight: bold; border: 1px solid #444; border-radius: 5px; }
-                QPushButton:hover { background-color: #0088ff; border-color: #0088ff; }
-                QPushButton:pressed { background-color: #0055aa; }
-            """)
-            b.clicked.connect(fn)
-            return b
+        # Add buttons
+        self.add_btn(btn_grid, "Show Network Info", self.action_net_info, 0, 0)
+        self.add_btn(btn_grid, "Run ARP Scan", self.action_arp_scan, 0, 1)
+        self.add_btn(btn_grid, "Profile Traffic", self.action_traffic, 0, 2)
         
-        self.btn_grid.addWidget(mkbtn("Show Network Info", self.run_net_info), 0, 0)
-        self.btn_grid.addWidget(mkbtn("Run ARP Scan", self.run_arp_scan), 0, 1)
-        self.btn_grid.addWidget(mkbtn("Profile Device Traffic", self.run_traffic), 0, 2)
+        self.add_btn(btn_grid, "Detect SYN Flood", self.action_syn_flood, 1, 0)
+        self.add_btn(btn_grid, "Check DNS Spoofing", self.action_dns_spoof, 1, 1)
+        self.add_btn(btn_grid, "Check Local Poisoning", self.action_local_poison, 1, 2)
+
+        self.add_btn(btn_grid, "Scan Rogue Devices", self.action_rogue_dev, 2, 0)
+        self.add_btn(btn_grid, "Scan Rogue APs", self.action_rogue_ap, 2, 1)
         
-        self.btn_grid.addWidget(mkbtn("Detect SYN Flood", self.run_syn), 1, 0)
-        self.btn_grid.addWidget(mkbtn("Check DNS Spoofing", self.run_dns), 1, 1)
-        self.btn_grid.addWidget(mkbtn("Check DNS Poisoning", self.run_poison), 1, 2)
-
-        self.btn_grid.addWidget(mkbtn("Scan Rogue Devices", self.run_rogue_device), 2, 0)
-        self.btn_grid.addWidget(mkbtn("Scan Rogue APs", self.run_rogue_ap), 2, 1)
-        self.btn_grid.addWidget(mkbtn("Monitor Suspicious Activity", self.run_suspicious), 2, 2)
-
-        self.main_layout.addLayout(self.btn_grid)
-        self.create_menus()
+        main_layout.addLayout(btn_grid)
+        self.create_menu()
         
         print("<i style='color:#888'>[*] System Ready. Select a tool to begin analysis.</i>")
 
-    def create_menus(self):
+    def add_btn(self, layout, text, func, row, col):
+        btn = QPushButton(text)
+        btn.setStyleSheet("""
+            QPushButton { background-color: #222; color: white; padding: 15px; font-weight: bold; border: 1px solid #444; border-radius: 5px; }
+            QPushButton:hover { background-color: #0088ff; border-color: #0088ff; }
+            QPushButton:pressed { background-color: #0055aa; }
+        """)
+        btn.clicked.connect(func)
+        layout.addWidget(btn, row, col)
+
+    def create_menu(self):
         menubar = self.menuBar()
         menubar.setNativeMenuBar(False)
         file_menu = menubar.addMenu('&File')
         
-        clear_act = QAction('Clear Log', self)
-        clear_act.triggered.connect(self.clear_screen)
-        file_menu.addAction(clear_act)
+        clear = QAction('Clear Log', self)
+        clear.triggered.connect(self.output_log.clear)
+        file_menu.addAction(clear)
         
         exit_act = QAction('Exit', self)
         exit_act.triggered.connect(self.close)
         file_menu.addAction(exit_act)
 
-    def clear_screen(self):
+    # --- ACTIONS (Threading Wrappers) ---
+    # We use threads to prevent the GUI from freezing during scans
+
+    def action_net_info(self):
         self.output_log.clear()
+        self.logic_engine.scanner.get_network_details(print_output=True)
 
-    # --- ACTION HANDLERS ---
+    def action_arp_scan(self):
+        self.output_log.clear()
+        threading.Thread(target=lambda: self.logic_engine.scanner.scan_arp(verbose=True), daemon=True).start()
 
-    def run_net_info(self):
-        self.clear_screen()
-        self.engine.PrivateScanner.GetNetworkData(PrintDetails=True)
-
-    def run_arp_scan(self):
-        self.clear_screen()
-        threading.Thread(target=lambda: self.engine.PrivateScanner.ARP_DiscoverHosts(verbose=True), daemon=True).start()
-
-    def run_traffic(self):
+    def action_traffic(self):
         d, ok = QInputDialog.getInt(self, "Traffic Profile", "Duration (seconds):", 60, 10, 600)
         if ok: 
-            self.clear_screen()
-            threading.Thread(target=lambda: self.engine.identify_devices_by_traffic(duration=d, verbose=True), daemon=True).start()
+            self.output_log.clear()
+            threading.Thread(target=lambda: self.logic_engine.profile_traffic(duration=d), daemon=True).start()
 
-    def run_syn(self):
+    def action_syn_flood(self):
         d, ok = QInputDialog.getInt(self, "SYN Flood", "Duration (seconds):", 30, 10, 600)
         if ok: 
-            self.clear_screen()
-            threading.Thread(target=lambda: self.engine.detect_syn_flood(duration=d, verbose=True), daemon=True).start()
+            self.output_log.clear()
+            threading.Thread(target=lambda: self.logic_engine.detect_syn_flood(duration=d), daemon=True).start()
 
-    def run_dns(self):
-        self.clear_screen()
+    def action_dns_spoof(self):
+        self.output_log.clear()
+        # In a real app, these would be user-configurable or loaded from a file
         targets = {"google.com": ["142.250.190.46"], "facebook.com": ["157.240.22.35"]}
-        threading.Thread(target=lambda: self.engine.detect_dns_spoofing(targets, verbose=True), daemon=True).start()
+        threading.Thread(target=lambda: self.logic_engine.check_dns_spoofing(targets), daemon=True).start()
 
-    def run_poison(self):
+    def action_local_poison(self):
         domain, ok = QInputDialog.getText(self, "DNS Poison Check", "Domain to check:", text="google.com")
         if ok:
-            self.clear_screen()
-            threading.Thread(target=lambda: self.engine.check_dns_poisoning(domain, "8.8.8.8"), daemon=True).start()
+            self.output_log.clear()
+            threading.Thread(target=lambda: self.logic_engine.check_local_poisoning(domain, "8.8.8.8"), daemon=True).start()
 
-    def run_rogue_device(self):
-        self.clear_screen()
-        # Demo whitelist
-        known = ["00:11:22:33:44:55", "AA:BB:CC:DD:EE:FF"] 
-        threading.Thread(target=lambda: self.engine.detect_rogue_devices(known_devices_macs=known, verbose=True), daemon=True).start()
+    def action_rogue_dev(self):
+        self.output_log.clear()
+        # Mock whitelist
+        known_macs = ["00:11:22:33:44:55", "AA:BB:CC:DD:EE:FF"] 
+        threading.Thread(target=lambda: self.logic_engine.detect_rogue_devices(whitelist_macs=known_macs), daemon=True).start()
 
-    def run_rogue_ap(self):
-        self.clear_screen()
-        threading.Thread(target=lambda: self.engine.detect_rogue_access_points(verbose=True), daemon=True).start()
-
-    def run_suspicious(self):
-        d, ok = QInputDialog.getInt(self, "Suspicious Activity", "Duration (seconds):", 60, 10, 600)
-        if ok: 
-            self.clear_screen()
-            threading.Thread(target=lambda: self.engine.monitor_network_for_suspicious_activity(duration=d, verbose=True), daemon=True).start()
+    def action_rogue_ap(self):
+        self.output_log.clear()
+        threading.Thread(target=lambda: self.logic_engine.detect_rogue_aps(), daemon=True).start()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = AnalyzerGUI()
+    window = AppWindow()
     window.show()
     sys.exit(app.exec())
